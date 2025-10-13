@@ -11,7 +11,9 @@ dependencies = [
     "fastapi (>=0.119.0,<0.120.0)",
     "uvicorn (>=0.37.0,<0.38.0)",
     "sqlalchemy (>=2.0.44,<3.0.0)",
-    "alembic (>=1.17.0,<2.0.0)"
+    "alembic (>=1.17.0,<2.0.0)",
+    "aiogram (>=3.22.0,<4.0.0)",
+    "dotenv (>=0.9.9,<0.10.0)"
 ]
 
 [tool.poetry]
