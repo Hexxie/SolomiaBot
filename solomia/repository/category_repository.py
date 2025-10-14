@@ -36,6 +36,16 @@ class FoodCategoryRepository(BaseRepository[FoodCategory]):
                 text("SELECT id, name, examples, embedding FROM food_categories")
             )
             return res.mappings().all()
+        
+    async def get_examples_by_id(self, category_id: int) -> list[str]:
+        """Return all examples for the given category id."""
+        async with self.session_factory() as session:
+            res = await session.execute(
+                text("SELECT examples FROM food_categories WHERE id = :id"),
+                {"id": category_id},
+            )
+            row = res.first()
+            return row[0] if row else []
 
     async def insert_category(self, name: str, examples: list[str], embedding: np.ndarray):
         emb_str = "[" + ", ".join(str(x) for x in embedding) + "]"
@@ -60,16 +70,6 @@ class FoodCategoryRepository(BaseRepository[FoodCategory]):
                 {"id": category_id, "example": new_example},
             )
             await session.commit()
-
-    async def get_examples_by_id(self, category_id: int) -> list[str]:
-        """Return all examples for the given category id."""
-        async with self.session_factory() as session:
-            res = await session.execute(
-                text("SELECT examples FROM food_categories WHERE id = :id"),
-                {"id": category_id},
-            )
-            row = res.first()
-            return row[0] if row else []
 
     async def update_embedding(self, category_id: int, embedding: np.ndarray):
         emb_str = "[" + ", ".join(str(x) for x in embedding) + "]"

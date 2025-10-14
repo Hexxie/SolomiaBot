@@ -2,11 +2,13 @@ import os
 import traceback
 import asyncio
 import functools
+import re
 from sqlalchemy import text
 import google.generativeai as genai
 import numpy as np
 from solomia.core.db import SessionFactory
 from solomia.repository.category_repository import FoodCategoryRepository
+import json
 
 embedding_model = "models/text-embedding-004"
 
@@ -49,24 +51,8 @@ async def generate_category_embedding(name: str, examples: list[str]) -> np.ndar
     result = await get_embedding(text_input)
 
     # Convert embedding list → numpy array
-    embedding = np.array(result["embedding"], dtype=np.float32)
+    embedding = np.array(result, dtype=np.float32)
     return embedding
-
-
-def embedding_to_str(embedding: np.ndarray) -> str:
-    """
-    Convert numpy array to PostgreSQL-compatible string representation.
-
-    Example:
-        [0.123, -0.456, 0.789]
-
-    Args:
-        embedding (np.ndarray): Embedding vector.
-
-    Returns:
-        str: String representation of embedding.
-    """
-    return "[" + ", ".join(map(str, embedding.tolist())) + "]"
 
 
 async def find_best_category(conn, product_name: str, embedder=None, threshold: float = 0.75):
@@ -96,10 +82,10 @@ async def find_best_category(conn, product_name: str, embedder=None, threshold: 
     is_known = best_score >= threshold
     return best_category, best_score, is_known
 
-async def classify_with_llm(product_name: str, categories: list[str]) -> str:
+async def classify_with_llm(products: list[str], categories: list[str]) -> str:
     """
-    Uses Gemini to classify a product into one of the given categories.
-    Returns only the chosen category name as a string.
+    Uses Gemini to classify a *batch* of product names into given categories.
+    Returns JSON string: {"product": "category", ...}
     """
 
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -107,50 +93,76 @@ async def classify_with_llm(product_name: str, categories: list[str]) -> str:
         raise EnvironmentError("GOOGLE_API_KEY not found in environment variables")
 
     genai.configure(api_key=api_key)
-
     model = genai.GenerativeModel("gemini-2.5-flash")
 
     categories_str = "\n".join(f"- {cat}" for cat in categories)
+    products_str = "\n".join(f"- {p}" for p in products)
 
     prompt = f"""
     You are a food classification assistant.
 
-    Given a product name, decide which of the following food categories it belongs to.
-    Choose exactly one category and return ONLY its name — no explanations, no JSON.
+    Given a list of product names, classify each one into exactly one of the following categories.
+    Return ONLY a valid JSON object mapping product names to categories, like this:
+
+    {{
+        "apple": "Fruits",
+        "chicken breast": "Meat",
+        "milk": "Dairy"
+    }}
 
     Categories:
     {categories_str}
 
-    Product: {product_name}
+    Products:
+    {products_str}
     """
+
     try:
-        # Run the sync Gemini API call in a background thread
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None, functools.partial(model.generate_content, prompt)
         )
-
         response = (result.text or "").strip()
-        print(f"Gemini raw response: '{response}'")
+        print(f"Gemini raw response: {response[:300]}")
 
-        # Check if the category exists in the database
-        category_id = await repo.get_id_by_name(response)
-        if not category_id:
-            print(f"Category '{response}' not found in DB. Skipping update.")
-            return response
+        # --- Extract JSON if LLM adds text ---
+        json_match = re.search(r"\{.*\}", response, re.DOTALL)
+        if not json_match:
+            raise ValueError("No JSON object found in LLM response")
 
-        # Append the product name to the category's examples
-        await repo.append_example(category_id, product_name)
+        parsed = json.loads(json_match.group(0))
 
-        # Retrieve updated examples and regenerate the category embedding
-        examples = await repo.get_examples_by_id(category_id)
-        embedding = await generate_category_embedding(response, examples)
-        await repo.update_embedding(category_id, embedding_to_str(embedding))
+        # --- Validate ---
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM output is not a valid JSON object")
 
-        print(f"Added '{product_name}' to category '{response}'")
-        return response
+        # --- Update DB for each classification ---
+        async with repo.session_factory() as session:
+            for product_name, category_name in parsed.items():
+                # Skip if empty or weird
+                if not category_name or not isinstance(category_name, str):
+                    continue
+
+                category_id = await repo.get_id_by_name(category_name)
+                if not category_id:
+                    print(f"⚠️ Category '{category_name}' not found for product '{product_name}'")
+                    continue
+
+                # Append example
+                await repo.append_example(category_id, product_name)
+
+                # Regenerate embedding for updated examples
+                examples = await repo.get_examples_by_id(category_id)
+                embedding = await generate_category_embedding(category_name, examples)
+                await repo.update_embedding(category_id, embedding)
+
+                print(f"✅ Added '{product_name}' to category '{category_name}'")
+
+            await session.commit()
+
+        return json.dumps(parsed, ensure_ascii=False, indent=2)
 
     except Exception as e:
-        print(f"Error during classification: {type(e).__name__}: {e}")
+        print(f"❌ Error during classification: {type(e).__name__}: {e}")
         print(traceback.format_exc())
-        return None
+        return "{}"
