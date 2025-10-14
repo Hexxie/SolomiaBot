@@ -1,0 +1,1 @@
+from solomia.repository.category_repository import FoodCategoryRepository
