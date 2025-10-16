@@ -1,4 +1,6 @@
 from .food_category import FoodCategory
 from .user import User
+from .reports import Report
+from .reports_item import ReportItem
 
-__all__ = ["FoodCategory", "User"]
+__all__ = ["FoodCategory", "User", "Report", "ReportItem"]
