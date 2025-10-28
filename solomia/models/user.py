@@ -15,3 +15,4 @@ class User(Base):
     birth_year = Column(Integer, nullable=True)
 
     reports = relationship("Report", back_populates="user", cascade="all, delete-orphan")
+    categories = relationship("FoodCategory", secondary="category_to_user", viewonly=True)

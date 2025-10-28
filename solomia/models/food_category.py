@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.types import UserDefinedType
+from sqlalchemy.orm import relationship
 
 from solomia.core.db import Base
 
@@ -20,3 +21,6 @@ class FoodCategory(Base):
     name = Column(String, nullable=False)
     examples = Column(ARRAY(String))
     embedding = Column(Vector(768))
+
+    users = relationship("User",secondary="category_to_user",viewonly=True)
+    user_links = relationship("CategoryToUser", back_populates="category", cascade="all, delete-orphan")
