@@ -3,11 +3,16 @@ import json
 from datetime import date
 from sqlalchemy import text
 from solomia.core.db import engine, SessionFactory
+from solomia.models import Report, ReportItem
 from solomia.services.category_service import find_best_category, classify_with_llm
 from solomia.repository.user_repository import UserRepository
 from solomia.repository.report_repository import ReportRepository
 from solomia.repository.report_item_repository import ReportItemRepository
 from solomia.repository.category_repository import FoodCategoryRepository
+from sqlalchemy import select, func
+from datetime import date
+from solomia.models.food_category import FoodCategory
+from solomia.models.category_to_user import CategoryToUser
 import google.generativeai as genai
 import os
 import functools
@@ -187,6 +192,71 @@ async def save_report(products: list[dict]):
     print(f"Items pushed, go check them")
 
 
+
+
+async def evaluate_user_plan(user_id):
+    """
+    Compare the user's current day intake against their personalized category plan.
+    """
+    try:
+        async with SessionFactory() as session:
+            # 1️⃣ Aggregate today's eaten food by category (sum of grams)
+            eaten_stmt = (
+                select(
+                    FoodCategory.name.label("category"),
+                    func.sum(ReportItem.amount_grams).label("total_eaten")
+                )
+                .join(Report, Report.id == ReportItem.report_id)
+                .join(FoodCategory, FoodCategory.id == ReportItem.category_id)
+                .where(Report.user_id == user_id)
+                .where(Report.date == date.today())
+                .group_by(FoodCategory.name)
+            )
+
+            eaten_rows = await session.execute(eaten_stmt)
+            eaten = {row.category: float(row.total_eaten or 0) for row in eaten_rows}
+
+            # 2️⃣ Retrieve user's planned daily category amounts (target grams)
+            plan_stmt = (
+                select(FoodCategory.name, CategoryToUser.amount_grams)
+                .join(FoodCategory, FoodCategory.id == CategoryToUser.category_id)
+                .where(CategoryToUser.user_id == user_id)
+            )
+
+            plan_rows = await session.execute(plan_stmt)
+            plan = {row.name: float(row.amount_grams or 0) for row in plan_rows}
+
+            # --- User interaction starts here ---
+            print("\n📊 Оцінка раціону за сьогодні:")
+
+            # 3️⃣ Compare eaten vs planned and print results
+            for category, planned in plan.items():
+                eaten_grams = eaten.get(category, 0)
+                if planned == 0:
+                    continue
+                ratio = eaten_grams / planned
+
+                if ratio < 0.7:
+                    status = "🟠 потрібно більше"
+                elif ratio > 1.2:
+                    status = "🔴 забагато"
+                else:
+                    status = "🟢 збалансовано"
+
+                print(f"{category:25s} {eaten_grams:6.0f} г / {planned:6.0f} г → {status}")
+
+            # 4️⃣ Handle categories that exist in report but not in the plan
+            extra = [c for c in eaten.keys() if c not in plan]
+            if extra:
+                print("\n⚠️ Не входять у план (нові або невідомі категорії):")
+                for c in extra:
+                    print(f" - {c} ({eaten[c]} г)")
+
+    except Exception as e:
+        print(f"❌ Помилка під час оцінки раціону: {e}")
+
+
+
 async def main():
     print("🍎 Встав звіт нижче й натисни Enter:")
     print("(Ctrl+D або Ctrl+Z щоб завершити ввід)\n")
@@ -203,6 +273,10 @@ async def main():
         report = await classify_report(ret)
         print(f"Result:\n{report}")
         await save_report(report)
+
+        user = UserRepository(SessionFactory)
+        user_id = await user.get_id_by_telegram_id("12345678")
+        await evaluate_user_plan(user_id)
     except Exception as e:
         print(f"❌ Помилка: {e}\n")
 
